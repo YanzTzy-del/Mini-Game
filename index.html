@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Mini Roblox Multiplayer</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+  <style>
+    body { margin: 0; overflow: hidden; font-family: sans-serif; background: black; }
+    #hud {
+      position: absolute; top: 10px; left: 10px;
+      color: white; background: rgba(0,0,0,0.5);
+      padding: 8px 12px; border-radius: 6px;
+    }
+    @media screen and (orientation: portrait) {
+      body::before {
+        content: "🔄 Putar ke mode landscape untuk bermain";
+        position: fixed; top: 50%; left: 50%;
+        transform: translate(-50%, -50%);
+        color: white; font-size: 20px;
+        background: rgba(0,0,0,0.7);
+        padding: 20px; border-radius: 12px;
+        text-align: center;
+      }
+      canvas { display: none; }
+      #hud { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <div id="hud">🎮 WASD = Gerak | Mouse = Arah | Space = Lompat | Klik = Taruh Blok</div>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.152.2/build/three.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.152.2/examples/js/controls/PointerLockControls.js"></script>
+  <script>
+    // === Scene ===
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x87ceeb);
+
+    const camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.1, 1000);
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    document.body.appendChild(renderer.domElement);
+
+    // === Lights ===
+    scene.add(new THREE.HemisphereLight(0xffffff, 0x444444, 1));
+    const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+    dirLight.position.set(10, 20, 5);
+    scene.add(dirLight);
+
+    // === Ground ===
+    const ground = new THREE.Mesh(
+      new THREE.PlaneGeometry(200, 200),
+      new THREE.MeshLambertMaterial({ color: 0x228B22 })
+    );
+    ground.rotation.x = -Math.PI / 2;
+    scene.add(ground);
+
+    // === Controls ===
+    const controls = new THREE.PointerLockControls(camera, document.body);
+    document.body.addEventListener('click', () => controls.lock());
+    scene.add(controls.getObject());
+
+    const velocity = new THREE.Vector3();
+    const direction = new THREE.Vector3();
+    const keys = {};
+    let canJump = false;
+
+    document.addEventListener('keydown', e => {
+      keys[e.code] = true;
+      if (e.code === 'Space' && canJump) {
+        velocity.y += 8; canJump = false;
+      }
+    });
+    document.addEventListener('keyup', e => keys[e.code] = false);
+
+    // === Avatar Blocky ===
+    function createAvatar(color=0x00ffff) {
+      const group = new THREE.Group();
+      const body = new THREE.Mesh(new THREE.BoxGeometry(1, 2, 1), new THREE.MeshLambertMaterial({ color }));
+      body.position.y = 1;
+      group.add(body);
+      const head = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshLambertMaterial({ color: 0xffddaa }));
+      head.position.y = 2.5;
+      group.add(head);
+      return group;
+    }
+
+    let myId = null;
+    let players = {};
+    let blocks = [];
+
+    // === Multiplayer WebSocket ===
+    // Ganti URL ini dengan alamat server WebSocket kamu (misalnya dari Render)
+    const socket = new WebSocket("wss://your-server-url.com");
+
+    socket.onmessage = (msg) => {
+      const data = JSON.parse(msg.data);
+
+      if (data.type === "init") {
+        myId = data.id;
+        Object.entries(data.players).forEach(([id, p]) => { if (id !== myId) addPlayer(id, p); });
+        data.blocks.forEach(b => addBlock(b));
+      }
+      if (data.type === "update" && data.id !== myId) updatePlayer(data.id, data.player);
+      if (data.type === "block") addBlock(data.block);
+      if (data.type === "leave") removePlayer(data.id);
+    };
+
+    function send(type, payload) {
+      socket.send(JSON.stringify({ type, ...payload }));
+    }
+
+    function addPlayer(id, p) {
+      const avatar = createAvatar(0x00ffcc);
+      scene.add(avatar);
+      players[id] = { mesh: avatar, ...p };
+    }
+    function updatePlayer(id, p) {
+      if (!players[id]) addPlayer(id, p);
+      players[id].mesh.position.set(p.x, p.y, p.z);
+      players[id].mesh.rotation.y = p.rotY;
+    }
+    function removePlayer(id) {
+      if (players[id]) { scene.remove(players[id].mesh); delete players[id]; }
+    }
+
+    // === Blocks ===
+    function addBlock(block) {
+      const cube = new THREE.Mesh(
+        new THREE.BoxGeometry(1, 1, 1),
+        new THREE.MeshLambertMaterial({ color: block.color })
+      );
+      cube.position.set(block.x, block.y, block.z);
+      scene.add(cube);
+      blocks.push(cube);
+    }
+
+    document.addEventListener('mousedown', () => {
+      const pos = controls.getObject().position.clone();
+      const block = {
+        x: Math.round(pos.x + Math.sin(camera.rotation.y) * 3),
+        y: 0.5,
+        z: Math.round(pos.z + Math.cos(camera.rotation.y) * 3),
+        color: Math.random() * 0xffffff
+      };
+      addBlock(block);
+      send("block", { block });
+    });
+
+    // === Game Loop ===
+    let prevTime = performance.now();
+    function animate() {
+      requestAnimationFrame(animate);
+      const time = performance.now();
+      const delta = (time - prevTime) / 1000;
+
+      velocity.x -= velocity.x * 10.0 * delta;
+      velocity.z -= velocity.z * 10.0 * delta;
+      velocity.y -= 25.0 * delta;
+
+      direction.z = Number(keys['KeyW']) - Number(keys['KeyS']);
+      direction.x = Number(keys['KeyD']) - Number(keys['KeyA']);
+      direction.normalize();
+
+      if (keys['KeyW'] || keys['KeyS']) velocity.z -= direction.z * 50.0 * delta;
+      if (keys['KeyA'] || keys['KeyD']) velocity.x -= direction.x * 50.0 * delta;
+
+      controls.moveRight(-velocity.x * delta);
+      controls.moveForward(-velocity.z * delta);
+      controls.getObject().position.y += velocity.y * delta;
+
+      if (controls.getObject().position.y < 2) {
+        velocity.y = 0; controls.getObject().position.y = 2; canJump = true;
+      }
+
+      if (myId) {
+        send("move", {
+          player: {
+            x: controls.getObject().position.x,
+            y: controls.getObject().position.y,
+            z: controls.getObject().position.z,
+            rotY: camera.rotation.y
+          }
+        });
+      }
+
+      renderer.render(scene, camera);
+      prevTime = time;
+    }
+    animate();
+
+    window.addEventListener('resize', () => {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+  </script>
+</body>
+</html>
